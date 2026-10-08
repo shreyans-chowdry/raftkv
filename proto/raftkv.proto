@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package raftkv;
+
+option go_package = "github.com/shreyans-chowdry/raftkv/proto/raftkvpb";
+
+// ---- Raft peer traffic --------------------------------------------------
+//
+// Raft messages are one-way (see transport.Transport), so peers keep one
+// client stream open to each other and push RaftMessage values down it.
+// A reply is just another RaftMessage on the reverse stream.
+
+message Entry {
+  uint64 index = 1;
+  uint64 term = 2;
+  uint32 type = 3; // transport.EntryType
+  bytes data = 4;
+}
+
+// RaftMessage mirrors transport.Message field for field.
+message RaftMessage {
+  uint32 type = 1; // transport.MsgType
+  uint64 from = 2;
+  uint64 to = 3;
+  uint64 term = 4;
+
+  uint64 last_log_index = 5;
+  uint64 last_log_term = 6;
+  bool granted = 7;
+
+  uint64 prev_log_index = 8;
+  uint64 prev_log_term = 9;
+  repeated Entry entries = 10;
+  uint64 leader_commit = 11;
+
+  bool success = 12;
+  uint64 match_index = 13;
+  uint64 conflict_index = 14;
+  uint64 conflict_term = 15;
+  uint64 reject_index = 16;
+  uint64 seq = 17;
+
+  uint64 snap_index = 18;
+  uint64 snap_term = 19;
+  bytes snapshot = 20;
+}
+
+message Empty {}
+
+service Raft {
+  // Stream carries all messages from one peer to this node.
+  rpc Stream(stream RaftMessage) returns (Empty);
+}
+
+// ---- Client API -----------------------------------------------------------
+
+message GetRequest {
+  string key = 1;
+  uint64 client_id = 2;
+  uint64 seq = 3;
+}
+
+message GetResponse {
+  // "" on success; "ErrWrongLeader" (see leader_hint), "ErrTimeout", "ErrShutdown".
+  string err = 1;
+  string value = 2;
+  uint64 leader_hint = 3;
+}
+
+message PutAppendRequest {
+  string key = 1;
+  string value = 2;
+  bool append = 3;
+  uint64 client_id = 4;
+  uint64 seq = 5;
+}
+
+message PutAppendResponse {
+  string err = 1;
+  uint64 leader_hint = 2;
+}
+
+service KV {
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc PutAppend(PutAppendRequest) returns (PutAppendResponse);
+}
