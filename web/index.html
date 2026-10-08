@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RaftKV cluster</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1b; --muted: #6d6a63; --line: #dedbd2;
+    --leader: #c2410c; --follower: #2f6f8f; --candidate: #a16207; --down: #9c9a94;
+    --cut: #b91c1c; --bar: #2f6f8f; --bar-bg: #ebe8e0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141413; --panel: #1d1d1b; --ink: #ecebe6; --muted: #9b988f; --line: #33322e;
+      --leader: #f97316; --follower: #5fa8cc; --candidate: #eab308; --down: #6b6964;
+      --cut: #f87171; --bar: #5fa8cc; --bar-bg: #2a2926;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  header { padding: 18px 24px 8px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 28px; }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .facts { display: flex; gap: 22px; color: var(--muted); }
+  .facts b { color: var(--ink); font-weight: 600; }
+  main { display: grid; grid-template-columns: minmax(320px, 520px) 1fr; gap: 16px; padding: 8px 24px 24px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 8px 16px 16px; } header { padding: 16px; } }
+  main > section { min-width: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  svg { width: 100%; height: auto; display: block; }
+  .node-label { font-size: 15px; font-weight: 600; fill: var(--ink); }
+  .node-sub { font-size: 11.5px; fill: var(--muted); }
+  .link { stroke: var(--line); stroke-width: 1.5; }
+  .link.cut { stroke: var(--cut); stroke-dasharray: 5 5; }
+  .pulse { fill: var(--leader); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .role { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  button { font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  button:hover { border-color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
+  .bar { height: 6px; background: var(--bar-bg); border-radius: 3px; overflow: hidden; min-width: 60px; }
+  .bar > div { height: 100%; background: var(--bar); }
+  .events { margin-top: 14px; max-height: 220px; overflow: auto; font-size: 12.5px; color: var(--muted); }
+  .events div { padding: 2px 0; }
+  .events b { color: var(--ink); font-weight: 500; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .scroll { overflow-x: auto; }
+  .err { color: var(--cut); }
+</style>
+</head>
+<body>
+<header>
+  <h1>RaftKV <span>live cluster</span></h1>
+  <div class="facts">
+    <div>leader <b id="f-leader" class="mono">–</b></div>
+    <div>term <b id="f-term" class="mono">–</b></div>
+    <div>commit <b id="f-commit" class="mono">–</b></div>
+    <div>up <b id="f-up" class="mono">–</b></div>
+  </div>
+</header>
+<main>
+  <section class="card">
+    <svg id="ring" viewBox="0 0 480 440" role="img" aria-label="Cluster nodes arranged in a ring"></svg>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--leader)"></i> leader</span>
+      <span><i class="dot" style="background:var(--follower)"></i> follower</span>
+      <span><i class="dot" style="background:var(--candidate)"></i> candidate</span>
+      <span><i class="dot" style="background:var(--down)"></i> down / isolated</span>
+      <span><i style="display:inline-block;width:18px;border-top:2px dashed var(--cut);vertical-align:middle"></i> cut link</span>
+    </div>
+  </section>
+  <section class="card">
+    <div class="scroll">
+      <table>
+        <thead><tr><th>node</th><th>role</th><th>term</th><th>commit</th><th>applied</th><th>last</th><th>snapshot</th><th>progress</th><th></th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="controls">
+      <button id="partition">Partition: leader + 1 | other 3</button>
+      <button id="heal">Heal everything</button>
+    </div>
+    <div class="events" id="events"></div>
+  </section>
+</main>
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const ring = document.getElementById("ring");
+const rows = document.getElementById("rows");
+const eventsEl = document.getElementById("events");
+let last = {};          // id -> previous {role, term, up}
+let nodes = [];
+let lastCommit = 0;
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function colorFor(n) {
+  if (!n.up || n.status.isolated) return "var(--down)";
+  return {leader: "var(--leader)", candidate: "var(--candidate)"}[n.status.role] || "var(--follower)";
+}
+function logEvent(text) {
+  const d = document.createElement("div");
+  const t = new Date().toLocaleTimeString();
+  d.innerHTML = `<span class="mono">${t}</span> ${text}`;
+  eventsEl.prepend(d);
+  while (eventsEl.childNodes.length > 80) eventsEl.lastChild.remove();
+}
+function positions(k) {
+  const cx = 240, cy = 214, r = 152;
+  return Array.from({length: k}, (_, i) => {
+    const a = -Math.PI / 2 + i * 2 * Math.PI / k;
+    return [cx + r * Math.cos(a), cy + r * Math.sin(a)];
+  });
+}
+function cut(a, b) {
+  if (!a.up || !b.up) return false;
+  const ab = (a.status.blocked || []).includes(b.id) || (b.status.blocked || []).includes(a.id);
+  return ab || a.status.isolated || b.status.isolated;
+}
+
+function draw() {
+  ring.replaceChildren();
+  const pos = positions(nodes.length);
+  const leader = nodes.find(n => n.up && n.status.role === "leader" && !n.status.isolated);
+  // links between every pair; cut ones dashed red
+  for (let i = 0; i < nodes.length; i++)
+    for (let j = i + 1; j < nodes.length; j++) {
+      if (!nodes[i].up || !nodes[j].up) continue;
+      el("line", {x1: pos[i][0], y1: pos[i][1], x2: pos[j][0], y2: pos[j][1],
+                  class: "link" + (cut(nodes[i], nodes[j]) ? " cut" : "")}, ring);
+    }
+  // heartbeat pulses from the leader to reachable followers
+  if (leader) {
+    const li = nodes.indexOf(leader);
+    nodes.forEach((n, j) => {
+      if (j === li || !n.up || cut(leader, n)) return;
+      const c = el("circle", {r: 4, class: "pulse"}, ring);
+      const anim = el("animateMotion", {dur: "0.6s", repeatCount: "1", fill: "freeze",
+        path: `M${pos[li][0]},${pos[li][1]} L${pos[j][0]},${pos[j][1]}`}, c);
+      el("animate", {attributeName: "opacity", from: "1", to: "0", dur: "0.6s", fill: "freeze"}, c);
+      anim.beginElement && anim.beginElement();
+    });
+  }
+  const maxIdx = Math.max(1, ...nodes.filter(n => n.up).map(n => n.status.lastIndex));
+  nodes.forEach((n, i) => {
+    const [x, y] = pos[i];
+    const g = el("g", {}, ring);
+    el("circle", {cx: x, cy: y, r: 44, fill: "var(--panel)", stroke: colorFor(n), "stroke-width": 4,
+                  "stroke-dasharray": (n.up && n.status.isolated) ? "6 5" : "none"}, g);
+    const t = el("text", {x, y: y - 4, "text-anchor": "middle", class: "node-label"}, g);
+    t.textContent = "n" + n.id;
+    const s = el("text", {x, y: y + 13, "text-anchor": "middle", class: "node-sub"}, g);
+    s.textContent = !n.up ? "down" : (n.status.isolated ? "isolated" : `${n.status.role} · t${n.status.term}`);
+    if (n.up) {
+      // commit / last index bar under the node
+      const w = 70, bx = x - w / 2, by = y + 52;
+      el("rect", {x: bx, y: by, width: w, height: 6, rx: 3, fill: "var(--bar-bg)"}, g);
+      el("rect", {x: bx, y: by, width: w * n.status.commitIndex / maxIdx, height: 6, rx: 3, fill: colorFor(n)}, g);
+      const it = el("text", {x, y: by + 19, "text-anchor": "middle", class: "node-sub mono"}, g);
+      it.textContent = `commit ${n.status.commitIndex}`;
+    }
+  });
+}
+
+function table() {
+  const maxIdx = Math.max(1, ...nodes.filter(n => n.up).map(n => n.status.lastIndex));
+  rows.replaceChildren();
+  for (const n of nodes) {
+    const tr = document.createElement("tr");
+    const s = n.status || {};
+    const role = !n.up ? "down" : (s.isolated ? s.role + " (isolated)" : s.role);
+    const pct = n.up ? (100 * s.commitIndex / maxIdx).toFixed(0) : 0;
+    tr.innerHTML = `<td class="mono">n${n.id}</td>
+      <td><span class="role"><i class="dot" style="background:${colorFor(n)}"></i>${role}</span></td>
+      <td class="mono">${n.up ? s.term : "–"}</td><td class="mono">${n.up ? s.commitIndex : "–"}</td>
+      <td class="mono">${n.up ? s.lastApplied : "–"}</td><td class="mono">${n.up ? s.lastIndex : "–"}</td>
+      <td class="mono">${n.up ? s.snapshotIndex : "–"}</td>
+      <td><div class="bar"><div style="width:${pct}%"></div></div></td>
+      <td></td>`;
+    if (n.up) {
+      const b = document.createElement("button");
+      b.textContent = s.isolated ? "Rejoin" : "Isolate";
+      b.title = s.isolated ? "Reconnect this node" : "Drop all Raft traffic to and from this node (looks like a crash to the others)";
+      b.onclick = () => admin(n.id, s.isolated ? "rejoin" : "isolate");
+      tr.lastElementChild.appendChild(b);
+    }
+    rows.appendChild(tr);
+  }
+}
+
+function facts() {
+  const up = nodes.filter(n => n.up);
+  const leader = up.find(n => n.status.role === "leader" && !n.status.isolated);
+  document.getElementById("f-leader").textContent = leader ? "n" + leader.id : "none";
+  document.getElementById("f-term").textContent = up.length ? Math.max(...up.map(n => n.status.term)) : "–";
+  const commit = up.length ? Math.max(...up.map(n => n.status.commitIndex)) : 0;
+  document.getElementById("f-commit").textContent = commit;
+  document.getElementById("f-up").textContent = `${up.length}/${nodes.length}`;
+}
+
+function diff() {
+  for (const n of nodes) {
+    const p = last[n.id];
+    const cur = {up: n.up, role: n.up ? n.status.role : "down", term: n.up ? n.status.term : 0};
+    if (p) {
+      if (p.up !== cur.up) logEvent(`<b>n${n.id}</b> ${cur.up ? "is reachable again" : "stopped responding"}`);
+      else if (cur.up && p.role !== cur.role) logEvent(`<b>n${n.id}</b> ${p.role} → ${cur.role} (term ${cur.term})`);
+    }
+    last[n.id] = cur;
+  }
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/status");
+    const data = await r.json();
+    nodes = data.nodes.map(n => ({id: n.id, up: n.up, status: n.status ? n.status : null}));
+    diff(); facts(); draw(); table();
+  } catch (e) {
+    logEvent(`<span class="err">dashboard can't reach /api/status: ${e}</span>`);
+  }
+}
+
+async function admin(id, action, peers) {
+  const q = new URLSearchParams({node: id, action});
+  if (peers !== undefined) q.set("peers", peers);
+  await fetch("/api/admin?" + q, {method: "POST"});
+  poll();
+}
+
+document.getElementById("partition").onclick = async () => {
+  const up = nodes.filter(n => n.up);
+  const leader = up.find(n => n.status.role === "leader") || up[0];
+  if (!leader) return;
+  const other = up.find(n => n.id !== leader.id);
+  const a = [leader.id, other.id];
+  const b = nodes.map(n => n.id).filter(id => !a.includes(id));
+  for (const id of a) await admin(id, "block", b.join(","));
+  for (const id of b) await admin(id, "block", a.join(","));
+  logEvent(`partitioned {${a.map(x => "n" + x)}} | {${b.map(x => "n" + x)}}`);
+};
+document.getElementById("heal").onclick = async () => {
+  for (const n of nodes.filter(n => n.up)) { await admin(n.id, "block", ""); await admin(n.id, "rejoin"); }
+  logEvent("healed: all links restored");
+};
+
+poll();
+setInterval(poll, 250);
+</script>
+</body>
+</html>
