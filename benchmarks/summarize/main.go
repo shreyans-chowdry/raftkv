@@ -17,9 +17,9 @@ import (
 )
 
 type row struct {
-	label       string
-	conc        int
-	ops         float64
+	label          string
+	conc           int
+	ops            float64
 	p50, p99, p999 float64
 }
 
@@ -93,7 +93,11 @@ func main() {
 	fmt.Fprintf(&b, "## Optimisation ladder\n\nEach row adds one change to the row above it. Median ops/s (p99 ms in brackets).\n\n")
 	fmt.Fprintf(&b, "| step | change |")
 	for _, c := range concs {
-		fmt.Fprintf(&b, " %d clients |", c)
+		if c == 1 {
+			fmt.Fprintf(&b, " 1 client |")
+		} else {
+			fmt.Fprintf(&b, " %d clients |", c)
+		}
 	}
 	fmt.Fprintf(&b, "\n|---|---|")
 	for range concs {

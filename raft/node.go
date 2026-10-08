@@ -288,7 +288,6 @@ type Node struct {
 	stTerm   atomic.Uint64
 	stLeader atomic.Uint64 // leader id as known by this node
 	stIsLead atomic.Bool
-	stSize   atomic.Int64
 }
 
 // NewNode loads persisted state from cfg.Storage and starts the node.

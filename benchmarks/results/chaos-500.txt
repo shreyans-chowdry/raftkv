@@ -1,10 +1,10 @@
 chaos summary
   runs:               500 (seeds 1..500, 5s fault injection each, 4 in parallel)
   failures:           0
-  operations checked: 875281 (422362 gets, 452919 puts/appends)
-  fault events:       5784
-  leaders elected:    1830
-  wall time:          10m56s
+  operations checked: 996744 (477539 gets, 519205 puts/appends)
+  fault events:       5788
+  leaders elected:    1818
+  wall time:          10m54s
 variants:
   maxRaftState=-1    readIndex=false checkQuorum=false  42 runs
   maxRaftState=-1    readIndex=false checkQuorum=true  41 runs

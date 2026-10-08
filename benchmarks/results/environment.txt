@@ -1,0 +1,7 @@
+date:     2026-10-08T17:36:11Z
+os:       Linux 6.18.44-fc-v80 x86_64
+cpu:      Intel(R) Xeon(R) Processor @ 2.10GHz (2 logical CPUs)
+memory:   7 GiB
+go:       go1.24.7 linux/amd64
+cluster:  5 raftkv-server processes + raftkv-bench on the same machine, loopback network
+storage:  /dev/vda (data dir ./data)

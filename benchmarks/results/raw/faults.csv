@@ -1,0 +1,2 @@
+label,concurrency,ops_per_sec,p50_ms,p99_ms,p999_ms,max_ms,ops,errors,time
+faults,32,8935.4,3.296,7.746,13.813,1062.568,536127,0,2026-10-08T19:01:48Z

@@ -429,8 +429,9 @@ func syncDir(dir string) error {
 }
 
 // encoder/decoder: a minimal little-endian binary format. Hand-rolled rather
-// than gob because gob writes type information per stream and is several
-// times slower for the tiny records written on every RPC.
+// than gob because gob puts type information at the start of a stream, and
+// this file is a sequence of independent records that must each be readable
+// on their own (after a torn write, after a rewrite).
 type encoder struct{ b []byte }
 
 func (e *encoder) u8(v uint8)   { e.b = append(e.b, v) }

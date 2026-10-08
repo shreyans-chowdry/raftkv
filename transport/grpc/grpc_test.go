@@ -20,7 +20,7 @@ func TestProtoRoundTrip(t *testing.T) {
 		Granted: true, PrevLogIndex: 6, PrevLogTerm: 7, LeaderCommit: 8, Success: true, MatchIndex: 9,
 		ConflictIndex: 10, ConflictTerm: 11, RejectIndex: 12, Seq: 13, SnapIndex: 14, SnapTerm: 15,
 		Snapshot: []byte("snap"),
-		Entries: []transport.Entry{{Index: 1, Term: 2, Type: transport.EntryNoop}, {Index: 2, Term: 2, Data: []byte("x")}}}
+		Entries:  []transport.Entry{{Index: 1, Term: 2, Type: transport.EntryNoop}, {Index: 2, Term: 2, Data: []byte("x")}}}
 	got := FromPB(ToPB(m))
 	if !reflect.DeepEqual(got, m) {
 		t.Fatalf("round trip:\n got %+v\nwant %+v", got, m)
