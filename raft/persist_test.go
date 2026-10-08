@@ -341,8 +341,8 @@ func (f *fakeT) Fatalf(format string, args ...interface{}) {
 	f.mu.Unlock()
 	panic(errFakeFatal)
 }
-func (f *fakeT) Fatal(args ...interface{}) { f.Fatalf("%s", fmt.Sprint(args...)) }
-func (f *fakeT) Helper()                    {}
+func (f *fakeT) Fatal(args ...interface{})   { f.Fatalf("%s", fmt.Sprint(args...)) }
+func (f *fakeT) Helper()                     {}
 func (f *fakeT) Logf(string, ...interface{}) {}
 func (f *fakeT) failed() bool {
 	f.mu.Lock()

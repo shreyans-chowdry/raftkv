@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shreyans-chowdry/raftkv/chaos"
+	"github.com/shreyans-chowdry/raftkv/kv"
 	"github.com/shreyans-chowdry/raftkv/raft"
 	"github.com/shreyans-chowdry/raftkv/transport/sim"
 )
@@ -41,7 +42,7 @@ func ctxT(t *testing.T, d time.Duration) context.Context {
 func TestBasic(t *testing.T) {
 	c := newCluster(t, chaos.Options{Seed: 1})
 	ck := c.Clerk(1)
-	ctx := ctxT(t, 20 * time.Second)
+	ctx := ctxT(t, 20*time.Second)
 	if err := ck.Put(ctx, "a", "1"); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func runClients(t *testing.T, opt chaos.Options, nclients int, dur time.Duration
 			defer wg.Done()
 			ck := c.Clerk(uint64(i + 1))
 			key := fmt.Sprintf("k%d", i)
-			ctx := ctxT(t, dur + 60*time.Second)
+			ctx := ctxT(t, dur+60*time.Second)
 			for j := 0; ; j++ {
 				select {
 				case <-stop:
@@ -234,7 +235,7 @@ func TestDuplicateAppendAppliedOnce(t *testing.T) {
 	c := newCluster(t, chaos.Options{Seed: 9})
 	c.SetClientFaults(0, 0.5)
 	ck := c.Clerk(1)
-	ctx := ctxT(t, 60 * time.Second)
+	ctx := ctxT(t, 60*time.Second)
 	for j := 0; j < 30; j++ {
 		if err := ck.Append(ctx, "k", fmt.Sprintf("x 0 %d y", j)); err != nil {
 			t.Fatal(err)
@@ -253,7 +254,7 @@ func TestSnapshotsBoundLog(t *testing.T) {
 	const maxState = 2000
 	c := newCluster(t, chaos.Options{Seed: 10, MaxRaftState: maxState})
 	ck := c.Clerk(1)
-	ctx := ctxT(t, 60 * time.Second)
+	ctx := ctxT(t, 60*time.Second)
 	biggest := int64(0)
 	for j := 0; j < 400; j++ {
 		ck.Append(ctx, fmt.Sprintf("k%d", j%10), "0123456789")
@@ -275,7 +276,7 @@ func TestSnapshotsBoundLog(t *testing.T) {
 func TestInstallSnapshotCatchUp(t *testing.T) {
 	c := newCluster(t, chaos.Options{Seed: 11, MaxRaftState: 1000})
 	ck := c.Clerk(1)
-	ctx := ctxT(t, 60 * time.Second)
+	ctx := ctxT(t, 60*time.Second)
 	ck.Put(ctx, "a", "start")
 	leader, _ := c.Leader()
 	lagger := raft.NodeID(1)
@@ -328,4 +329,42 @@ func TestSnapshotsWithFaults(t *testing.T) {
 func TestSnapshotsWithCrashesReadIndex(t *testing.T) {
 	runClients(t, chaos.Options{Seed: 13, MaxRaftState: 1000, ReadIndex: true}, 5, 4*time.Second,
 		faults{crashes: true})
+}
+
+// TestNoStaleReadFromDeposedLeader: a leader cut off from the other
+// servers (but still reachable by clients) must not answer a Get with its
+// old state after a new leader has committed a newer write. With ReadIndex
+// it can't collect heartbeat acks, so the read fails instead of going stale;
+// with log reads, the Get can't commit.
+func TestNoStaleReadFromDeposedLeader(t *testing.T) {
+	for _, readIndex := range []bool{true, false} {
+		t.Run(fmt.Sprintf("readIndex=%v", readIndex), func(t *testing.T) {
+			// Without check-quorum the deposed leader keeps believing it
+			// leads, so only the read path itself can prevent a stale read.
+			c := newCluster(t, chaos.Options{Seed: 14, ReadIndex: readIndex, NoCheckQuorum: true,
+				OpTimeout: 500 * time.Millisecond})
+			ctx := ctxT(t, 30*time.Second)
+			ck := c.Clerk(1)
+			ck.Put(ctx, "x", "old")
+			old := mustLeader(t, c)
+			// Make sure the old leader has applied "old" locally.
+			if r := c.Server(old).Get(ctx, &kv.GetArgs{Key: "x", ClientID: 50, Seq: 1}); r.Err != kv.OK || r.Value != "old" {
+				t.Fatalf("leader read before isolation: %+v", r)
+			}
+			c.Isolate(old)
+			// A new leader commits a newer value.
+			if err := ck.Put(ctx, "x", "new"); err != nil {
+				t.Fatal(err)
+			}
+			if _, lead := c.Node(old).GetState(); !lead {
+				t.Fatalf("test setup: old leader already stepped down")
+			}
+			// Ask the deposed leader directly.
+			r := c.Server(old).Get(ctx, &kv.GetArgs{Key: "x", ClientID: 51, Seq: 1})
+			if r.Err == kv.OK && r.Value != "new" {
+				t.Fatalf("deposed leader n%d served a stale read: %q", old, r.Value)
+			}
+			t.Logf("deposed leader answered Err=%q value=%q", r.Err, r.Value)
+		})
+	}
 }

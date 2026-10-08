@@ -30,6 +30,8 @@ type Options struct {
 
 	MaxRaftState int64 // KV snapshot threshold in bytes (<= 0: never)
 	ReadIndex    bool  // serve Gets with ReadIndex instead of the log
+	// NoCheckQuorum lets deposed leaders keep believing they lead.
+	NoCheckQuorum bool
 
 	// OpTimeout for the KV servers (default 1s).
 	OpTimeout time.Duration
@@ -123,6 +125,7 @@ func (c *Cluster) boot(m *member) error {
 		TickInterval: c.opt.Tick, ElectionTicksMin: c.opt.ElectionTicksMin,
 		ElectionTicksMax: c.opt.ElectionTicksMax, HeartbeatTicks: c.opt.HeartbeatTicks,
 		Seed: c.opt.Seed*1000 + int64(m.id)*10 + int64(m.boots), ApplyCh: applyCh, Observer: c.Checker,
+		DisableCheckQuorum: c.opt.NoCheckQuorum,
 	})
 	if err != nil {
 		st.Close()
@@ -200,6 +203,17 @@ func (c *Cluster) Node(id raft.NodeID) *raft.Node {
 		return nil
 	}
 	return m.rf
+}
+
+// Server returns the running KV server for id (nil if down).
+func (c *Cluster) Server(id raft.NodeID) *kv.Server {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.member(id)
+	if !m.up {
+		return nil
+	}
+	return m.kv
 }
 
 // Store returns the persister of node id (nil if down).

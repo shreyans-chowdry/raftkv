@@ -110,6 +110,12 @@ type Config struct {
 	// when stopped. Required.
 	ApplyCh chan<- ApplyMsg
 
+	// DisableCheckQuorum keeps a leader that has lost contact with a
+	// majority in office until it hears of a higher term. Safety does not
+	// depend on check-quorum; tests turn it off to widen the window in which
+	// a deposed leader still believes it leads.
+	DisableCheckQuorum bool
+
 	// Observer, if set, is told about elections and commits so tests can
 	// check safety invariants while the cluster runs.
 	Observer Observer
@@ -589,7 +595,7 @@ func (n *Node) tick() {
 			n.broadcastHeartbeat()
 		}
 		n.quorumTick++
-		if n.quorumTick >= n.cfg.ElectionTicksMax {
+		if n.quorumTick >= n.cfg.ElectionTicksMax && !n.cfg.DisableCheckQuorum {
 			n.quorumTick = 0
 			n.checkQuorum()
 		}
