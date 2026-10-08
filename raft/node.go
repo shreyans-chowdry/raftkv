@@ -10,9 +10,10 @@
 //
 // Every loop iteration ends with flush(): first make buffered state durable
 // (one fsync for everything changed in that iteration, which is group
-// commit), then send the messages queued during the iteration. Because sends
-// happen only after the fsync, no reply ever claims something that isn't on
-// disk yet.
+// commit), then send the messages queued during the iteration. Because
+// replies are sent only after the fsync, no reply ever claims something that
+// isn't on disk yet. (A leader's AppendEntries are the exception: they
+// promise nothing about the leader's disk, so they go out before its fsync.)
 package raft
 
 import (
@@ -105,6 +106,13 @@ type Config struct {
 	// DisableGroupCommit fsyncs after every individual state change instead
 	// of once per loop iteration. Only used to measure group commit.
 	DisableGroupCommit bool
+
+	// SerialLeaderWrite makes the leader fsync new entries before sending
+	// them to followers. By default it sends AppendEntries first and syncs
+	// its own disk in parallel (thesis 10.2.1); that is safe because the
+	// leader only counts itself toward a majority after the fsync. Only
+	// used to measure the difference.
+	SerialLeaderWrite bool
 
 	// ApplyCh receives committed entries and snapshots. The node closes it
 	// when stopped. Required.
@@ -535,6 +543,22 @@ func (n *Node) flush() {
 		}
 	}
 	n.readHB = false
+	if n.role == Leader && !n.cfg.SerialLeaderWrite {
+		// AppendEntries and InstallSnapshot from a leader promise nothing
+		// about the leader's own disk, so they can go out before the fsync;
+		// the disk write and the network round trip then overlap. Replies
+		// (votes, acks) still wait for the fsync below.
+		k := 0
+		for _, m := range n.outbox {
+			if m.Type == transport.MsgApp || m.Type == transport.MsgSnap {
+				n.cfg.Transport.Send(m.To, m)
+			} else {
+				n.outbox[k] = m
+				k++
+			}
+		}
+		n.outbox = n.outbox[:k]
+	}
 	if err := n.cfg.Storage.Sync(); err != nil {
 		// Losing durability silently would break safety; better to stop.
 		panic(fmt.Sprintf("raft n%d: fsync failed: %v", n.id, err))

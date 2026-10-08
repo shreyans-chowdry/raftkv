@@ -30,7 +30,7 @@ case "${1:-}" in
     [ -x "$BIN" ] || go build -o bin/ ./cmd/...
     "$0" stop >/dev/null 2>&1 || true
     rm -rf "$DATA"; mkdir -p "$DATA"
-    printf '%s\n' "$@" >"$FLAGS_FILE"
+    echo "$@" >"$FLAGS_FILE"
     for i in $(seq 1 "$N"); do start_node "$i" "$@"; done
     echo "started $N nodes: $PEERS"
     ;;
@@ -41,9 +41,9 @@ case "${1:-}" in
     i=$2; kill -9 "$(cat "$DATA/n$i.pid")"; rm -f "$DATA/n$i.pid"; echo "killed n$i"
     ;;
   restart)
-    i=$2; mapfile -t flags <"$FLAGS_FILE" || flags=()
-    flags=("${flags[@]/#/}"); [ "${#flags[@]}" -eq 1 ] && [ -z "${flags[0]}" ] && flags=()
-    start_node "$i" "${flags[@]}"; echo "restarted n$i"
+    i=$2
+    # shellcheck disable=SC2046
+    start_node "$i" $(cat "$FLAGS_FILE"); echo "restarted n$i"
     ;;
   status)
     for i in $(seq 1 "$N"); do

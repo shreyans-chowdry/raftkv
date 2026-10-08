@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"sort"
@@ -43,6 +44,7 @@ func main() {
 		batching     = flag.Bool("batching", true, "pack many entries into one AppendEntries")
 		inflight     = flag.Int("max-inflight", 64, "pipelining window per follower (1 = no pipelining)")
 		groupCommit  = flag.Bool("group-commit", true, "one fsync per event-loop iteration instead of per update")
+		parallelWr   = flag.Bool("parallel-leader-write", true, "leader sends AppendEntries before its own fsync")
 		verbose      = flag.Bool("v", false, "Raft debug logging")
 	)
 	flag.Parse()
@@ -77,7 +79,8 @@ func main() {
 		ID: me, Peers: ids, Transport: tr, Storage: store,
 		TickInterval: *tick, ElectionTicksMin: *electMin, ElectionTicksMax: *electMax, HeartbeatTicks: *hbTicks,
 		MaxInflight: *inflight, DisableBatching: !*batching, DisableGroupCommit: !*groupCommit,
-		ApplyCh: applyCh,
+		SerialLeaderWrite: !*parallelWr,
+		ApplyCh:           applyCh,
 	}
 	if *verbose {
 		cfg.Logger = logger
@@ -100,8 +103,8 @@ func main() {
 			logger.Fatal(err)
 		}
 	}()
-	logger.Printf("serving on %s (peers %v, data %s, read-index=%v batching=%v max-inflight=%d group-commit=%v)",
-		*listen, peers, *dataDir, *readIndex, *batching, *inflight, *groupCommit)
+	logger.Printf("serving on %s (peers %v, data %s, read-index=%v batching=%v max-inflight=%d group-commit=%v parallel-leader-write=%v)",
+		*listen, peers, *dataDir, *readIndex, *batching, *inflight, *groupCommit, *parallelWr)
 
 	if *statusPort > 0 {
 		go serveStatus(*statusPort, rf, tr, logger)
@@ -158,6 +161,9 @@ func serveStatus(port int, rf *raft.Node, tr *grpct.Transport, logger *log.Logge
 		logger.Printf("admin: blocked=%v", ids)
 		status(w, r)
 	})
+	// Profiling: go tool pprof http://localhost:PORT/debug/pprof/profile
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	logger.Printf("status on http://localhost:%d/status", port)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

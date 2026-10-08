@@ -64,11 +64,14 @@ type result struct {
 	value string
 }
 
-// waiter is a client request waiting for its log index to be applied.
+// opKey identifies one client request.
+type opKey struct{ client, seq uint64 }
+
+// waiter is a client request waiting for its op to be applied.
 type waiter struct {
-	clientID, seq uint64
-	term          uint64
-	ch            chan result
+	key   opKey
+	index uint64 // log index Raft gave it (0 until Start returns)
+	ch    chan result
 }
 
 // Server is one replica of the KV service.
@@ -81,7 +84,8 @@ type Server struct {
 	store       *Store
 	lastApplied uint64
 	lastSnap    uint64
-	waiters     map[uint64]*waiter
+	waiters     map[opKey]*waiter  // by request
+	byIndex     map[uint64]*waiter // by the log index Start returned
 	killed      bool
 	done        chan struct{}
 }
@@ -91,7 +95,8 @@ func NewServer(rf *raft.Node, applyCh <-chan raft.ApplyMsg, cfg Config) *Server 
 	if cfg.OpTimeout == 0 {
 		cfg.OpTimeout = 2 * time.Second
 	}
-	s := &Server{rf: rf, cfg: cfg, store: NewStore(), waiters: map[uint64]*waiter{}, done: make(chan struct{})}
+	s := &Server{rf: rf, cfg: cfg, store: NewStore(), waiters: map[opKey]*waiter{},
+		byIndex: map[uint64]*waiter{}, done: make(chan struct{})}
 	s.applied = sync.NewCond(&s.mu)
 	go s.applyLoop(applyCh)
 	return s
@@ -105,12 +110,27 @@ func (s *Server) Raft() *raft.Node { return s.rf }
 func (s *Server) Kill() {
 	s.mu.Lock()
 	s.killed = true
-	for idx, w := range s.waiters {
-		w.ch <- result{err: ErrShutdown}
-		delete(s.waiters, idx)
-	}
+	s.failAll(ErrShutdown)
 	s.mu.Unlock()
 	s.applied.Broadcast()
+}
+
+// resolve answers w (if still waiting) and forgets it. Caller holds mu.
+func (s *Server) resolve(w *waiter, r result) {
+	if s.waiters[w.key] != w {
+		return // already answered or replaced
+	}
+	delete(s.waiters, w.key)
+	if w.index != 0 && s.byIndex[w.index] == w {
+		delete(s.byIndex, w.index)
+	}
+	w.ch <- r
+}
+
+func (s *Server) failAll(e Err) {
+	for _, w := range s.waiters {
+		s.resolve(w, result{err: e})
+	}
 }
 
 // Done is closed when the apply loop exits (after the Raft node stops).
@@ -135,29 +155,43 @@ func (s *Server) PutAppend(ctx context.Context, args *PutAppendArgs) *PutAppendR
 	return &PutAppendReply{Err: r.err, LeaderHint: s.rf.LeaderHint()}
 }
 
-// submit puts op in the log and waits until it is applied at the index Raft
-// gave it. If something else shows up at that index, or our term changes,
-// we lost leadership and the op may never commit here: the client must
-// retry elsewhere (dedup makes the retry safe even if this one did commit).
+// submit puts op in the log and waits until it is applied. If a different
+// op shows up at the index Raft gave us, or our term changes, we lost
+// leadership and this op may never commit here: the client must retry
+// elsewhere (dedup makes the retry safe even if this attempt did commit).
+//
+// Waiters are keyed by (clientID, seq) and registered before Start, so the
+// apply loop can't miss them, and mu is NOT held across Start. That matters
+// for throughput: many submits can be inside Start at once, so the Raft
+// loop finds many proposals waiting and puts them in one batch with one
+// fsync. (Holding a lock across Start would let only one proposal through
+// per loop iteration.)
 func (s *Server) submit(ctx context.Context, op Op) result {
+	w := &waiter{key: opKey{op.ClientID, op.Seq}, ch: make(chan result, 1)}
 	s.mu.Lock()
 	if s.killed {
 		s.mu.Unlock()
 		return result{err: ErrShutdown}
 	}
-	// Holding mu across Start is deliberate: the apply loop needs mu to
-	// apply anything, so the entry cannot be applied before we register the
-	// waiter. Raft's event loop never takes mu, so this can't deadlock.
+	if old := s.waiters[w.key]; old != nil {
+		// A retry of a request we're still waiting on: the old attempt
+		// gives up and the client gets its answer through this one.
+		s.resolve(old, result{err: ErrTimeout})
+	}
+	s.waiters[w.key] = w
+	s.mu.Unlock()
+
 	idx, term, isLeader := s.rf.Start(op.Encode())
+	s.mu.Lock()
 	if !isLeader {
-		s.mu.Unlock()
-		return result{err: ErrWrongLeader}
+		s.resolve(w, result{err: ErrWrongLeader})
+	} else if s.waiters[w.key] == w {
+		w.index = idx
+		if old := s.byIndex[idx]; old != nil {
+			s.resolve(old, result{err: ErrWrongLeader})
+		}
+		s.byIndex[idx] = w
 	}
-	w := &waiter{clientID: op.ClientID, seq: op.Seq, term: term, ch: make(chan result, 1)}
-	if old, ok := s.waiters[idx]; ok {
-		old.ch <- result{err: ErrWrongLeader}
-	}
-	s.waiters[idx] = w
 	s.mu.Unlock()
 
 	timer := time.NewTimer(s.cfg.OpTimeout)
@@ -169,25 +203,22 @@ func (s *Server) submit(ctx context.Context, op Op) result {
 		case r := <-w.ch:
 			return r
 		case <-ctx.Done():
-			s.dropWaiter(idx, w)
-			return result{err: ErrTimeout}
+			s.giveUp(w, ErrTimeout)
 		case <-timer.C:
-			s.dropWaiter(idx, w)
-			return result{err: ErrTimeout}
+			s.giveUp(w, ErrTimeout)
 		case <-check.C:
 			if t, _ := s.rf.GetState(); t != term {
-				s.dropWaiter(idx, w)
-				return result{err: ErrWrongLeader}
+				s.giveUp(w, ErrWrongLeader)
 			}
 		}
 	}
 }
 
-func (s *Server) dropWaiter(idx uint64, w *waiter) {
+// giveUp answers w with e unless the apply loop got there first; either
+// way the next receive on w.ch returns.
+func (s *Server) giveUp(w *waiter, e Err) {
 	s.mu.Lock()
-	if s.waiters[idx] == w {
-		delete(s.waiters, idx)
-	}
+	s.resolve(w, result{err: e})
 	s.mu.Unlock()
 }
 
@@ -238,21 +269,20 @@ func (s *Server) applyLoop(ch <-chan raft.ApplyMsg) {
 				}
 				s.lastApplied = m.SnapshotIndex
 				s.lastSnap = m.SnapshotIndex
-				// Waiters at or below the snapshot can't learn their result.
-				for idx, w := range s.waiters {
+				// Waiters at or below the snapshot can't learn their result
+				// here; the client retries and dedup answers it.
+				for idx, w := range s.byIndex {
 					if idx <= m.SnapshotIndex {
-						w.ch <- result{err: ErrWrongLeader}
-						delete(s.waiters, idx)
+						s.resolve(w, result{err: ErrWrongLeader})
 					}
 				}
 			}
 		case m.CommandValid && m.CommandIndex > s.lastApplied:
 			s.lastApplied = m.CommandIndex
-			w := s.waiters[m.CommandIndex]
-			delete(s.waiters, m.CommandIndex)
-			if m.Command == nil {
-				if w != nil {
-					w.ch <- result{err: ErrWrongLeader}
+			atIndex := s.byIndex[m.CommandIndex]
+			if m.Command == nil { // a leader's no-op
+				if atIndex != nil {
+					s.resolve(atIndex, result{err: ErrWrongLeader})
 				}
 				break
 			}
@@ -261,12 +291,16 @@ func (s *Server) applyLoop(ch <-chan raft.ApplyMsg) {
 				panic(err)
 			}
 			v := s.store.Apply(op)
-			if w != nil {
-				if w.clientID == op.ClientID && w.seq == op.Seq {
-					w.ch <- result{value: v}
-				} else {
-					w.ch <- result{err: ErrWrongLeader}
-				}
+			key := opKey{op.ClientID, op.Seq}
+			// Whoever is waiting for this request gets the result, even if
+			// it was waiting at a different index (e.g. an earlier attempt
+			// through another leader committed it).
+			if w := s.waiters[key]; w != nil {
+				s.resolve(w, result{value: v})
+			}
+			// Whoever expected something else at this index lost out.
+			if atIndex != nil && atIndex.key != key {
+				s.resolve(atIndex, result{err: ErrWrongLeader})
 			}
 		}
 		s.applied.Broadcast()
@@ -280,10 +314,7 @@ func (s *Server) applyLoop(ch <-chan raft.ApplyMsg) {
 	}
 	s.mu.Lock()
 	s.killed = true
-	for idx, w := range s.waiters {
-		w.ch <- result{err: ErrShutdown}
-		delete(s.waiters, idx)
-	}
+	s.failAll(ErrShutdown)
 	s.mu.Unlock()
 	s.applied.Broadcast()
 }
