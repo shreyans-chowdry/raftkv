@@ -1,0 +1,6 @@
+/bin/
+/data/
+*.test
+*.out
+chaos/failures/
+benchmarks/results/*.tmp
